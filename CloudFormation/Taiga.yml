@@ -1,0 +1,146 @@
+TaigaELB:
+  Type: 'AWS::ElasticLoadBalancing::LoadBalancer'
+  Properties:
+    HealthCheck:
+      HealthyThreshold: '2'
+      Interval: '5'
+      Target: 'TCP:80'
+      Timeout: '3'
+      UnhealthyThreshold: '2'
+    Listeners:
+      - InstancePort: '80'
+        InstanceProtocol: HTTP
+        LoadBalancerPort: '443'
+        Protocol: HTTPS
+        SSLCertificateId: ${self:custom.profiles.${self:provider.stage}.SSL_ARN}
+        PolicyNames: 
+          - ELBSecurityPolicy-2016-08
+      - InstanceProtocol: HTTP
+        InstancePort: '80'
+        LoadBalancerPort: '80'
+        Protocol: HTTP
+    Scheme: internet-facing
+    CrossZone: 'true'
+    Instances:
+     - Ref: EC2InstanceTaiga
+    AvailabilityZones: 
+      - "${self:provider.region}a"
+      - "${self:provider.region}b"
+      - "${self:provider.region}c"
+    Tags:
+      - Key: Name
+        Value: Taiga-elb
+
+DBInstance:
+  Type: AWS::RDS::DBInstance
+  Properties:
+    AllocatedStorage: 20
+    AllowMajorVersionUpgrade: true
+    AutoMinorVersionUpgrade: true
+    BackupRetentionPeriod: 7
+    DBInstanceClass: ${self:custom.profiles.${self:provider.stage}.DB_INSTANCE_CLASS}
+    DBInstanceIdentifier: taiga
+    DBName: taigadb
+    Engine: postgres
+    EngineVersion: 9.6.5
+    MasterUsername: taiga
+    MasterUserPassword: ${env:POSTGRES_PASSWORD, self:custom.profiles.${self:provider.stage}.POSTGRES_PASSWORD}
+    MultiAZ: false
+    PubliclyAccessible: true
+    StorageType: gp2
+    Tags:
+    - Key: Name
+      Value: 
+          Fn::Sub: '#{AWS::StackName}-RDS'
+    
+TaigaRole:
+  Type: AWS::IAM::Role
+  Properties:
+    AssumeRolePolicyDocument:
+      Version: '2012-10-17'
+      Statement:
+      - Effect: Allow
+        Principal:
+          Service: 'ec2.amazonaws.com'
+        Action:
+        - sts:AssumeRole
+    Path: "/"
+    Policies:
+    - PolicyName: LogRolePolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          - logs:DescribeLogStreams
+          Resource: 'arn:aws:logs:*:*:*'
+        - Effect: Allow
+          Action:
+          - "cloudformation:Describe*"
+          - "cloudformation:List*"
+          - "cloudformation:Get*"
+          - "cloudformation:PreviewStackUpdate"
+          - "cloudformation:SignalResource"
+          Resource: '*' 
+
+TaigaRoleInstaceProfile:
+  Type: AWS::IAM::InstanceProfile
+  Properties:
+    Path: "/"
+    Roles:
+    - Ref: TaigaRole
+
+
+EC2InstanceTaiga:
+  Type: AWS::EC2::Instance
+  Properties:
+    InstanceType: ${self:custom.profiles.${self:provider.stage}.TAIGA_INSTANCE_TYPE}
+    BlockDeviceMappings:
+      - 
+          DeviceName: /dev/sda1
+          Ebs:
+              VolumeSize: '100'
+              VolumeType: gp2
+    KeyName: ${self:custom.profiles.${self:provider.stage}.KEYNAME}
+    IamInstanceProfile:
+      Ref: TaigaRoleInstaceProfile
+    SourceDestCheck: false
+    ImageId: ami-58d7e821
+    
+    Tags:
+    - Key: Name
+      Value: Taiga
+    # This is the huge script to set up all the things we need on the machine
+    # The most important file is the /opt/Taiga/.env file, which defines the Redis and PostgreSQL databases
+    UserData:
+      "Fn::Base64":
+        "Fn::Sub":
+          - |
+              #!/bin/bash
+              #VERSION 0.0.4
+              apt-get update -y
+              apt-get -y install python-pip ntp
+              pip install awscli --upgrade
+              pip uninstall -y pyOpenSSL
+              python -m easy_install --upgrade pyOpenSSL
+              apt-get -y install git docker.io docker-compose
+              export POSTGRES_HOST=#{POSTGRES_URL}
+              export POSTGRES_PASSWORD=${self:custom.profiles.${self:provider.stage}.POSTGRES_PASSWORD}
+              export EMAIL_HOST_PASSWORD=${self:custom.profiles.${self:provider.stage}.EMAIL_HOST_PASSWORD}
+              export EMAIL_HOST_USER=${self:custom.profiles.${self:provider.stage}.EMAIL_HOST_USER}
+              export EMAIL_HOST_USER=${self:custom.profiles.${self:provider.stage}.EMAIL_HOST_USER}
+              export TRELLO_API_SECRET_KEY=${self:custom.profiles.${self:provider.stage}.TRELLO_API_SECRET_KEY}
+              export TRELLO_API_KEY=${self:custom.profiles.${self:provider.stage}.TRELLO_API_KEY}
+              rm -rf taiga
+              git clone ${self:custom.profiles.${self:provider.stage}.GITHUB_SOURCE} taiga
+              cd taiga/taiga-source
+              docker-compose up
+              rm /var/lib/cloud/instances/*/sem/config_scripts_user
+              
+          - POSTGRES_URL:
+              'Fn::GetAtt': 
+                - DBInstance
+                - Endpoint.Address

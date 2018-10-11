@@ -1,0 +1,4 @@
+media/
+pgdata/
+node_modules
+.serverless
